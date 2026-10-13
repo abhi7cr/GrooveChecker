@@ -13,4 +13,4 @@ COPY detect.py audio_bpm.py bounce_phase.py ./
 COPY webapp ./webapp
 
 EXPOSE 8123
-CMD ["python", "-m", "uvicorn", "webapp.app:app", "--host", "0.0.0.0", "--port", "8123"]
+CMD ["sh", "-c", "python -m uvicorn webapp.app:app --host 0.0.0.0 --port ${PORT:-8123}"]
