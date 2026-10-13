@@ -9,7 +9,7 @@ COPY webapp/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # detection pipeline lives one level up
-COPY detect.py audio_bpm.py bounce_phase.py ./
+COPY detect.py audio_bpm.py bounce_phase.py pose_worker.py audio_worker.py ./
 COPY webapp ./webapp
 
 EXPOSE 8123
