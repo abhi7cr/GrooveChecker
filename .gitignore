@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.pyc
+*.npz
+*.mp4
+*.mov
+*.png
+*_summary.json
+videos/
+results/
+webapp/jobs/
+.DS_Store
