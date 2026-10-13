@@ -4,6 +4,8 @@ import json, os, subprocess, sys
 import numpy as np
 import librosa
 
+from detect import movement_peak_hz
+
 VIDEOS = {
     "footwork-combo": ("sample.mp4", "pose_tracks.npz"),
     "hiphopindia-choreo": ("videos/hiphopindia-choreo.mp4", "results/hiphopindia-choreo_pose.npz"),
@@ -53,47 +55,6 @@ def kick_parity(src, beats):
     if min(e0, e1) < 1e-9:
         return None, 1.0
     return (0 if e0 >= e1 else 1), round(max(e0, e1) / min(e0, e1), 2)
-
-
-def movement_peak_hz(pose_npz):
-    """Concentration-weighted median of dominant hip-oscillation frequency
-    across high-confidence bounce windows (4s windows, zero-padded FFT)."""
-    d = np.load(pose_npz)
-    xs, ys, vis = d["xs"], d["ys"], d["vis"]
-    fps = float(d["fps"])
-    n = len(xs)
-    shx, shy = (xs[:, SH_L] + xs[:, SH_R]) / 2, (ys[:, SH_L] + ys[:, SH_R]) / 2
-    hpx, hpy = (xs[:, HIP_L] + xs[:, HIP_R]) / 2, (ys[:, HIP_L] + ys[:, HIP_R]) / 2
-    shv = (vis[:, SH_L] + vis[:, SH_R]) / 2
-    hpv = (vis[:, HIP_L] + vis[:, HIP_R]) / 2
-    torso = np.sqrt((shx - hpx) ** 2 + (shy - hpy) ** 2)
-    ok = (shv > 0.5) & (hpv > 0.5)
-    x = np.arange(n); m = ok & ~np.isnan(torso)
-    torso_i = np.interp(x, x[m], torso[m]) if m.sum() > 3 else np.ones(n)
-    hpy_i = np.interp(x, x[ok], hpy[ok]) if ok.sum() > 3 else np.zeros(n)
-    sig = hpy_i / np.maximum(torso_i, 1e-6)
-
-    w = int(4.0 * fps)
-    N = 512  # zero-padded FFT -> ~0.047 Hz resolution
-    peaks, weights = [], []
-    for t in range(0, n - w, w // 2):
-        s = sig[t:t + w] - sig[t:t + w].mean()
-        if s.std() < 1e-9 or ok[t:t + w].mean() < 0.7:
-            continue
-        spec = np.abs(np.fft.rfft(s, N)) ** 2
-        freqs = np.fft.rfftfreq(N, 1.0 / fps)
-        band = (freqs >= 0.6) & (freqs <= 3.4)
-        conc = spec[band].sum() / (spec.sum() + 1e-12)
-        if conc > 0.5:
-            peaks.append(float(freqs[band][np.argmax(spec[band])]))
-            weights.append(float(conc))
-    if not peaks:
-        return 0.0, 0.0
-    peaks, weights = np.array(peaks), np.array(weights)
-    order = np.argsort(peaks)
-    cum = np.cumsum(weights[order]) / weights.sum()
-    med = float(peaks[order][np.searchsorted(cum, 0.5)])
-    return float(weights.mean()), med
 
 
 def analyze_audio(vid):
