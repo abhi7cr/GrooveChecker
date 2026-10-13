@@ -1,0 +1,11 @@
+fastapi==0.143.0
+uvicorn==0.54.0
+python-multipart==0.0.32
+mediapipe==0.10.14
+opencv-python==5.0.0.93
+numpy==2.5.4
+scipy==1.18.1
+librosa==1.0.0
+matplotlib==3.11.2
+yt-dlp==2026.8.19
+soundfile==0.14.0
