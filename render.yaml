@@ -1,0 +1,10 @@
+# Render blueprint for Groove Check.
+# In Render: New > Blueprint, point at the repo, set the Root Directory to
+# the folder containing this file (dance-detection/).
+services:
+  - type: web
+    name: groove-check
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /
