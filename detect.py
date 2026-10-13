@@ -10,7 +10,6 @@ Writes <out_prefix>_pose.npz, <out_prefix>_scores.npz,
 import json, os, sys
 import cv2
 import numpy as np
-import mediapipe as mp
 
 # MediaPipe pose landmark ids
 NOSE = 0
@@ -38,6 +37,7 @@ DEEP_CORR_MIN = 0.40
 
 
 def extract_pose(src, npz_path):
+    import mediapipe as mp  # lazy: keeps the import light for non-pose workers
     cap = cv2.VideoCapture(src)
     fps = cap.get(cv2.CAP_PROP_FPS)
     n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -91,6 +91,47 @@ def xcorr(a, b, max_lag):
     full = np.correlate(a / da, b / db, mode="full") / len(a)
     c = len(a) - 1
     return full[c - max_lag:c + max_lag + 1]
+
+
+def movement_peak_hz(pose_npz):
+    """Concentration-weighted median of dominant hip-oscillation frequency
+    across high-confidence bounce windows (4s windows, zero-padded FFT)."""
+    d = np.load(pose_npz)
+    xs, ys, vis = d["xs"], d["ys"], d["vis"]
+    fps = float(d["fps"])
+    n = len(xs)
+    shx, shy = (xs[:, SH_L] + xs[:, SH_R]) / 2, (ys[:, SH_L] + ys[:, SH_R]) / 2
+    hpx, hpy = (xs[:, HIP_L] + xs[:, HIP_R]) / 2, (ys[:, HIP_L] + ys[:, HIP_R]) / 2
+    shv = (vis[:, SH_L] + vis[:, SH_R]) / 2
+    hpv = (vis[:, HIP_L] + vis[:, HIP_R]) / 2
+    torso = np.sqrt((shx - hpx) ** 2 + (shy - hpy) ** 2)
+    ok = (shv > 0.5) & (hpv > 0.5)
+    x = np.arange(n); m = ok & ~np.isnan(torso)
+    torso_i = np.interp(x, x[m], torso[m]) if m.sum() > 3 else np.ones(n)
+    hpy_i = np.interp(x, x[ok], hpy[ok]) if ok.sum() > 3 else np.zeros(n)
+    sig = hpy_i / np.maximum(torso_i, 1e-6)
+
+    w = int(4.0 * fps)
+    N = 512  # zero-padded FFT -> ~0.047 Hz resolution
+    peaks, weights = [], []
+    for t in range(0, n - w, w // 2):
+        s = sig[t:t + w] - sig[t:t + w].mean()
+        if s.std() < 1e-9 or ok[t:t + w].mean() < 0.7:
+            continue
+        spec = np.abs(np.fft.rfft(s, N)) ** 2
+        freqs = np.fft.rfftfreq(N, 1.0 / fps)
+        band = (freqs >= 0.6) & (freqs <= 3.4)
+        conc = spec[band].sum() / (spec.sum() + 1e-12)
+        if conc > 0.5:
+            peaks.append(float(freqs[band][np.argmax(spec[band])]))
+            weights.append(float(conc))
+    if not peaks:
+        return 0.0, 0.0
+    peaks, weights = np.array(peaks), np.array(weights)
+    order = np.argsort(peaks)
+    cum = np.cumsum(weights[order]) / weights.sum()
+    med = float(peaks[order][np.searchsorted(cum, 0.5)])
+    return float(weights.mean()), med
 
 
 def compute_scores(pose_npz, scores_npz):
@@ -180,7 +221,8 @@ def compute_scores(pose_npz, scores_npz):
     depth_corr = np.convolve(depth_corr, ker, mode="same")
     np.savez(scores_npz, bounce=bounce, wave=wave, rock=rock,
              depth_ratio=depth_ratio, depth_corr=depth_corr,
-             deep_frame=deep_frame, fps=np.array(fps))
+             deep_frame=deep_frame, fps=np.array(fps),
+             pose_coverage=np.array(pose_cov))
     return bounce, wave, rock, depth_ratio, depth_corr, deep_frame, fps, pose_cov
 
 
