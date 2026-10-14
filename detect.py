@@ -36,32 +36,71 @@ DEEP_RATIO_MIN = 1.15
 DEEP_CORR_MIN = 0.40
 
 
-def extract_pose(src, npz_path):
+def extract_pose(src, npz_path, model_complexity=1, max_width=0, frame_step=1,
+                 min_tracking_confidence=0.5, progress=None):
+    """Track pose landmarks.
+
+    Speed levers (for slow CPUs): model_complexity=0 (lite model),
+    max_width (downscale frames wider than this), frame_step=2 (track
+    every 2nd frame, linearly interpolate the rest — 12 fps still
+    resolves the 0.8–3 Hz bounce band comfortably).
+    progress(frac) is called periodically when given.
+    """
     import mediapipe as mp  # lazy: keeps the import light for non-pose workers
     cap = cv2.VideoCapture(src)
     fps = cap.get(cv2.CAP_PROP_FPS)
     n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    pose = mp.solutions.pose.Pose(static_image_mode=False, model_complexity=1,
+    pose = mp.solutions.pose.Pose(static_image_mode=False,
+                                  model_complexity=model_complexity,
                                   min_detection_confidence=0.5,
-                                  min_tracking_confidence=0.5)
+                                  min_tracking_confidence=min_tracking_confidence)
     xs = np.full((n, 33), np.nan)
     ys = np.full((n, 33), np.nan)
     vis = np.zeros((n, 33))
+    sampled = np.zeros(n, dtype=bool)
     i = 0
+    last_report = 0
     while True:
         ok, frame = cap.read()
         if not ok:
             break
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        res = pose.process(rgb)
-        if res.pose_landmarks:
-            for j, lm in enumerate(res.pose_landmarks.landmark):
-                xs[i, j], ys[i, j], vis[i, j] = lm.x, lm.y, lm.visibility
+        if i % frame_step == 0 and i < n:
+            if max_width and frame.shape[1] > max_width:
+                s = max_width / frame.shape[1]
+                frame = cv2.resize(frame, (0, 0), fx=s, fy=s,
+                                   interpolation=cv2.INTER_AREA)
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            else:
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            res = pose.process(rgb)
+            if res.pose_landmarks:
+                for j, lm in enumerate(res.pose_landmarks.landmark):
+                    xs[i, j], ys[i, j], vis[i, j] = lm.x, lm.y, lm.visibility
+            sampled[i] = True
         i += 1
+        if progress is not None and n > 0 and i - last_report >= 30:
+            last_report = i
+            progress(min(1.0, i / n))
     cap.release()
     pose.close()
-    np.savez(npz_path, xs=xs[:i], ys=ys[:i], vis=vis[:i], fps=np.array(fps))
-    return i, float(fps)
+    n = min(i, n)
+    xs, ys, vis, sampled = xs[:n], ys[:n], vis[:n], sampled[:n]
+    if frame_step > 1:
+        # Fill skipped frames by linear interpolation between tracked frames
+        # (genuine detection gaps stay NaN).
+        idx = np.arange(n)
+        for arr in (xs, ys, vis):
+            for j in range(33):
+                v = arr[:, j]
+                fill = ~sampled
+                if not fill.any():
+                    continue
+                s_idx = idx[sampled & ~np.isnan(v)]
+                if len(s_idx) >= 2:
+                    v[fill] = np.interp(idx[fill], s_idx, v[s_idx])
+                arr[:, j] = v
+    np.savez(npz_path, xs=xs, ys=ys, vis=vis, fps=np.array(fps))
+    return n, float(fps)
 
 
 def interp_nan(v):
@@ -242,7 +281,9 @@ def segments(score, fps, thr, min_dur=0.5):
     return segs
 
 
-def render(src, scores_npz, out_mp4):
+def render(src, scores_npz, out_mp4, max_width=0):
+    """Draw the score overlay. max_width downscales the output (faster
+    encode; the overlay is annotated at full res then shrunk)."""
     d = np.load(scores_npz)
     bounce, wave, fps = d["bounce"], d["wave"], float(d["fps"])
     rock = d["rock"] if "rock" in d else np.zeros_like(bounce)
@@ -252,8 +293,12 @@ def render(src, scores_npz, out_mp4):
     cap = cv2.VideoCapture(src)
     W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    ow, oh = W, H
+    if max_width and W > max_width:
+        ow = max_width
+        oh = (H * max_width // W) // 2 * 2
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(out_mp4, fourcc, fps, (W, H))
+    out = cv2.VideoWriter(out_mp4, fourcc, fps, (ow, oh))
     # Deep-bounce segments, labeled with the same rule as the summary
     # (depth_of), so the on-video tag always matches the reported labels.
     _bsegs = segments(bounce, fps, BOUNCE_TH)
@@ -293,6 +338,8 @@ def render(src, scores_npz, out_mp4):
         t = i / fps
         cv2.putText(frame, f"{int(t // 60)}:{t % 60:04.1f}", (W - 130, 40),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2, cv2.LINE_AA)
+        if (ow, oh) != (W, H):
+            frame = cv2.resize(frame, (ow, oh), interpolation=cv2.INTER_AREA)
         out.write(frame)
         i += 1
     cap.release(); out.release()
