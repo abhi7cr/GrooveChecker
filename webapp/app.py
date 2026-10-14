@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
@@ -22,6 +23,9 @@ IG_RE = re.compile(r"^https?://(www\.)?instagram\.com/(reel|p)/[A-Za-z0-9_\-]+/?
 app = FastAPI(title="Groove Check")
 pool = ThreadPoolExecutor(max_workers=2)
 jobs = {}
+# Serialize analyses: the free-tier box fits one job's peak comfortably,
+# not two at once.
+job_lock = threading.Lock()
 
 
 def _job_dir(job_id):
@@ -41,7 +45,8 @@ def _run(job_id, video_path):
         def progress(stage, frac):
             jobs[job_id].update(status="running", stage=stage, progress=frac)
 
-        result = run_job(job_dir, video_path, progress)
+        with job_lock:
+            result = run_job(job_dir, video_path, progress)
         jobs[job_id].update(status="done", stage="Done", progress=1.0,
                             result=result)
     except Exception as e:
