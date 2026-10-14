@@ -14,13 +14,23 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 
 import detect
-from audio_bpm import analyze_audio, movement_peak_hz
 from bounce_phase import classify_segment, hip_signal
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _worker(script, *args):
+    """Run a memory-isolated worker script; raise on failure."""
+    r = subprocess.run([sys.executable, os.path.join(ROOT, script), *args],
+                       capture_output=True, text=True, cwd=ROOT)
+    if r.returncode != 0:
+        raise RuntimeError(f"{script} failed: {r.stderr[-2000:]}")
+    return r.stdout
 
 
 def _lock(bpm, pose_npz):
     """half-time / single / double-time / off-beat / None, like audio_bpm."""
-    conc, peak = movement_peak_hz(pose_npz)
+    conc, peak = detect.movement_peak_hz(pose_npz)
     if not bpm or conc <= 0.45 or peak <= 0:
         return None, conc, peak
     beat_hz = bpm / 60
@@ -70,17 +80,28 @@ def run_job(job_dir, video_path, progress):
     scores_npz = f"{prefix}_scores.npz"
 
     progress("Tracking body landmarks", 0.05)
-    n, fps = detect.extract_pose(video_path, pose_npz)
+    # Pose (MediaPipe) runs in a child process: the TFLite model is the
+    # biggest single memory chunk and is released when the child exits.
+    _worker("pose_worker.py", video_path, pose_npz, scores_npz)
+    d = np.load(pose_npz)
+    fps = float(d["fps"])
 
     progress("Measuring bounce, rock and wave", 0.55)
-    bounce, wave, rock, dratio, dcorr, dframe, fps, cov = \
-        detect.compute_scores(pose_npz, scores_npz)
+    # (scores were computed by the pose worker; nothing to do here)
 
     progress("Listening to the beat", 0.65)
-    au = analyze_audio(video_path)
+    # librosa runs in a child process for the same reason.
+    audio_json = os.path.join(job_dir, "audio.json")
+    _worker("audio_worker.py", video_path, audio_json)
+    with open(audio_json) as f:
+        au = json.load(f)
     lock, conc, peak = _lock(au["bpm"], pose_npz)
 
     progress("Checking on-beat timing", 0.72)
+    sd = np.load(scores_npz)
+    bounce, wave, rock = sd["bounce"], sd["wave"], sd["rock"]
+    dratio, dcorr, dframe = sd["depth_ratio"], sd["depth_corr"], sd["deep_frame"]
+    cov = float(sd["pose_coverage"]) if "pose_coverage" in sd else 0.0
     bsegs = detect.segments(bounce, fps, detect.BOUNCE_TH)
     wsegs = detect.segments(wave, fps, detect.WAVE_TH)
     rsegs = detect.segments(rock, fps, 0.45)
@@ -89,7 +110,7 @@ def run_job(job_dir, video_path, progress):
     kick_par = au["kick_parity"] if au["kick_ratio"] >= 1.5 else None
     if lock in ("single", "half-time", "double-time"):
         pt, pdet, _ = hip_signal(pose_npz)
-        beats = au["beats"]
+        beats = np.array(au["beats"])
         typed = []
         for s, e, p, lab, r, c in bsegs:
             typ, lag, _ = classify_segment(pt, pdet, (s, e), beats,
