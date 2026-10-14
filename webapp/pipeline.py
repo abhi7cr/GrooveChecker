@@ -19,13 +19,22 @@ from bounce_phase import classify_segment, hip_signal
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def _worker(script, *args):
-    """Run a memory-isolated worker script; raise on failure."""
-    r = subprocess.run([sys.executable, os.path.join(ROOT, script), *args],
-                       capture_output=True, text=True, cwd=ROOT)
-    if r.returncode != 0:
-        raise RuntimeError(f"{script} failed: {r.stderr[-2000:]}")
-    return r.stdout
+def _worker(script, *args, on_progress=None):
+    """Run a memory-isolated worker script; stream PROGRESS lines to
+    on_progress(frac); raise on failure."""
+    proc = subprocess.Popen(
+        [sys.executable, os.path.join(ROOT, script), *args],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, cwd=ROOT)
+    for line in proc.stdout:
+        if on_progress and line.startswith("PROGRESS"):
+            try:
+                on_progress(float(line.split()[1]))
+            except (IndexError, ValueError):
+                pass
+    _, err = proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"{script} failed: {err[-2000:]}")
 
 
 def _lock(bpm, pose_npz):
@@ -46,8 +55,8 @@ def _lock(bpm, pose_npz):
 def _h264(src, dst):
     subprocess.run(
         ["ffmpeg", "-y", "-v", "error", "-i", src,
-         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23",
-         "-movflags", "+faststart", dst], check=True)
+         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+         "-crf", "23", "-movflags", "+faststart", dst], check=True)
 
 
 def _plot(scores_npz, out_png):
@@ -82,7 +91,9 @@ def run_job(job_dir, video_path, progress):
     progress("Tracking body landmarks", 0.05)
     # Pose (MediaPipe) runs in a child process: the TFLite model is the
     # biggest single memory chunk and is released when the child exits.
-    _worker("pose_worker.py", video_path, pose_npz, scores_npz)
+    _worker("pose_worker.py", video_path, pose_npz, scores_npz,
+            on_progress=lambda f: progress("Tracking body landmarks",
+                                           0.05 + f * 0.50))
     d = np.load(pose_npz)
     fps = float(d["fps"])
 
@@ -127,7 +138,7 @@ def run_job(job_dir, video_path, progress):
     _d["seg_phase"] = np.array([s[6] for s in bsegs], dtype="U16")
     np.savez(scores_npz, **_d)
     raw_mp4 = os.path.join(job_dir, "annotated_raw.mp4")
-    detect.render(video_path, scores_npz, raw_mp4)
+    detect.render(video_path, scores_npz, raw_mp4, max_width=480)
     out_mp4 = os.path.join(job_dir, "annotated.mp4")
     _h264(raw_mp4, out_mp4)
     os.remove(raw_mp4)
