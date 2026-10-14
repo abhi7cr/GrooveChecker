@@ -13,7 +13,21 @@ import detect
 
 def main():
     src, pose_npz, scores_npz = sys.argv[1], sys.argv[2], sys.argv[3]
-    n, fps = detect.extract_pose(src, pose_npz)
+    # optional: model_complexity max_width frame_step (speed levers)
+    kw = {}
+    if len(sys.argv) > 4:
+        kw["model_complexity"] = int(sys.argv[4])
+    if len(sys.argv) > 5:
+        kw["max_width"] = int(sys.argv[5])
+    if len(sys.argv) > 6:
+        kw["frame_step"] = int(sys.argv[6])
+    if len(sys.argv) > 7:
+        kw["min_tracking_confidence"] = float(sys.argv[7])
+
+    def on_progress(f):
+        print(f"PROGRESS {f:.3f}", flush=True)
+
+    n, fps = detect.extract_pose(src, pose_npz, progress=on_progress, **kw)
     bounce, wave, rock, dratio, dcorr, dframe, fps, cov = \
         detect.compute_scores(pose_npz, scores_npz)
     print(json.dumps({"n_frames": n, "fps": fps,
